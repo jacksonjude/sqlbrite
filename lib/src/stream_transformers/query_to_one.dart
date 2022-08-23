@@ -81,6 +81,78 @@ Stream<T> _queryToOneStreamTransformer<T>(
   return controller.stream;
 }
 
+Stream<T> _queryToOneStreamAsyncTransformer<T>(
+    final Stream<Query> stream,
+    final Future<T> Function(JSON row) rowMapper,
+    final _Wrapper<T>? defaultValue,
+    ) {
+  final controller = stream.isBroadcast
+      ? StreamController<T>.broadcast(sync: false)
+      : StreamController<T>(sync: false);
+  StreamSubscription<Query>? subscription;
+
+  Future<void> add(List<JSON> rows) async {
+    final length = rows.length;
+
+    if (length > 1) {
+      controller.addError(StateError('Query returned more than 1 row'));
+      return;
+    }
+
+    if (length == 0) {
+      if (defaultValue != null) {
+        controller.add(defaultValue.value);
+      } else {
+        controller.addError(StateError('Query returned 0 row'));
+      }
+      return;
+    }
+
+    final T result;
+    try {
+      result = await rowMapper(rows[0]);
+    } catch (e, s) {
+      controller.addError(e, s);
+      return;
+    }
+
+    controller.add(result);
+  }
+
+  controller.onListen = () {
+    subscription = stream.listen(
+          (query) {
+        Future<List<JSON>> future;
+        try {
+          future = query();
+        } catch (e, s) {
+          controller.addError(e, s);
+          return;
+        }
+
+        subscription!.pause();
+        future
+            .then(add, onError: controller.addError)
+            .whenComplete(subscription!.resume);
+      },
+      onError: controller.addError,
+      onDone: controller.close,
+    );
+
+    if (!stream.isBroadcast) {
+      controller.onPause = () => subscription!.pause();
+      controller.onResume = () => subscription!.resume();
+    }
+  };
+  controller.onCancel = () {
+    final toCancel = subscription;
+    subscription = null;
+    return toCancel?.cancel();
+  };
+
+  return controller.stream;
+}
+
 /// Transform [Query] to single value.
 /// [Stream<Query>] to [Stream<T>].
 extension MapToOneOrDefaultQueryStreamExtensions on Stream<Query> {
@@ -110,4 +182,7 @@ extension MapToOneQueryStreamExtensions on Stream<Query> {
   ///
   Stream<T> mapToOne<T>(T Function(JSON row) rowMapper) =>
       _queryToOneStreamTransformer(this, rowMapper, null);
+  
+  Stream<T> asyncMapToOne<T>(Future<T> Function(JSON row) rowMapper) =>
+      _queryToOneStreamAsyncTransformer(this, rowMapper, null);
 }
